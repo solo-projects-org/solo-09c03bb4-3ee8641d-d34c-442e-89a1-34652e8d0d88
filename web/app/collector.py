@@ -12,6 +12,10 @@ Guarantees implemented here:
    revision never changed; only then is the full day published atomically.
 5. Timeouts / 5xx / network errors retry the *current* page only (the cursor
    itself is not advanced until the page is accepted).
+6. If the review team withdrew the day while this run was in flight, the
+   publish transaction fences out revisions <= the withdrawn revision: a same
+   or older in-flight collection can never re-publish; only a strictly higher
+   revision (full-day validation repeated from scratch) may restore the day.
 """
 from __future__ import annotations
 
@@ -23,7 +27,6 @@ from datetime import date as date_cls
 from . import db
 from .station_client import (
     StationClient,
-    StationError,
     StationReadError,
     StaleCursorError,
 )
@@ -164,6 +167,11 @@ def collect_day(
         result = db.publish_version(
             db_path, section, date_str, pinned_revision, collected, worker, run_id
         )
+    except db.WithdrawnRevisionError as exc:
+        # The day was withdrawn (with a revision fence) while this collection
+        # was in flight: this revision or an older one can never restore it.
+        db.fail_run(db_path, run_id, str(exc))
+        raise CollectionError(str(exc)) from exc
     except db.StaleRevisionError as exc:
         # Re-mark the run failed: a concurrently published newer revision wins.
         db.fail_run(db_path, run_id, str(exc))
